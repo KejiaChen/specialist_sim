@@ -80,6 +80,7 @@ return the observation and an `info` dict of `(num_envs,)` arrays:
 where they stand. It is on by default; a reset before that step cancels it.
 
 `env.rows(env_idx)` hands one env's rows of the last step to a recorder,
+`env.failing(env_idx)` lists the contacts in one env that `Task.fails` names,
 `env.trace(qpos)` draws every lens at recorded coordinates, and
 `env.describe()` is the env as JSON, which `env.make(meta, **cfg)` stands again.
 
@@ -195,6 +196,11 @@ The left controller starts and the right one ends.
 An episode that ends on its own is kept, less its last `--cut` seconds if it
 failed, and the next layout follows. One without progress is never kept.
 
+A reset blocks the loop for about 60 ms while the operator keeps moving the
+controllers. The hands then take about as long again to reach the controllers'
+new poses. No episode keeps the rows within `--lead` seconds after a reset, 0.1 s
+by default.
+
 The fingers run on `xr.FINGER`, a servo critically damped at 25 Hz for a
 demonstrator's grip.
 
@@ -204,6 +210,19 @@ demonstrator's grip.
 stood (`state`), the setpoints they chased (`setpoint`) and `qpos`, and a JSON
 `meta` that `env.make` stands the env again from. No image is
 stored. `episode.joined` puts an episode's steps end to end.
+
+A recorded episode's `meta` holds `env.describe()` and the keys below. They
+describe the env at the episode's last row, even when a failed episode drops its
+last `--cut` seconds.
+
+| key | meaning |
+| --- | --- |
+| `score` | the task's counts |
+| `seed` | the seed the layout was drawn from |
+| `pulls` | every bond's pull in newtons, from `env.pulls`, active or not |
+| `ended` | `kept`, `success` or `failed` |
+| `failing` | the contacts the episode failed on, each `[body, geom]`, from `env.failing` |
+| `unstable` | whether MuJoCo reset the env |
 
 ```bash
 MUJOCO_GL=egl uv run --extra dataset sim-render ~/recordings/NAME/EPISODE.npz --out video.mp4

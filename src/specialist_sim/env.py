@@ -484,6 +484,20 @@ class Env[T: Task]:
     ``(num_envs, bonds)``."""
     return self._pull.copy()
 
+  def failing(self, env_idx: int) -> list[tuple[str, str]]:
+    """The contacts in one env after its last step that ``Task.fails`` names.
+    Each appears once, as the object's body name and the touched geom's name."""
+    mine, theirs = self._fouls(
+      *self.sim.get_data(env_idx, self._scratch).contact.geom.T
+    )
+    model = self.model
+    return sorted(
+      {
+        (model.body(model.geom_bodyid[g]).name, model.geom(h).name)
+        for g, h in zip(mine.tolist(), theirs.tolist(), strict=True)
+      }
+    )
+
   def rows(self, env_idx: int) -> Rows:
     """One env's rows of the last step."""
     clock = self.cfg.clock
