@@ -260,3 +260,20 @@ MUJOCO_GL=egl uv run --extra arm sim-replay-arm \
 The reports measure pose error, joint limits, and collisions at sampled poses.
 The example layouts are virtual. For hardware comparisons, measure the base
 and mount transforms and calibrate the Omega tag pose and finger zero.
+
+For the FR3 Omega IK backend, use the Omega-Infra `dev-fr3` worktree and its
+dedicated Python environment. Add the following arguments to the replay command:
+
+```bash
+--solver omega-limited --omega-root ~/Documents/Omega-Infra-dev-fr3 \
+  --omega-python "$PWD/local/fr3-env/solver/bin/python"
+```
+
+`omega` uses the H1-2 objective and four-sample filter on the FR3 chain.
+`omega-limited` also bounds every emitted joint step using the recorded time
+interval and the named `[ik.max_velocity_rad_s]` values (rad/s). The first
+sample establishes the initial pose. Both modes verify Pinocchio against
+MuJoCo before replay. The solver weights, filter weights and IPOPT budgets
+can be overridden in `[omega]`; the effective settings appear in the JSON.
+CSV velocity columns refer to adjacent emitted poses, including held frames.
+The default `scipy` backend retains its previous valid-pose warm start.

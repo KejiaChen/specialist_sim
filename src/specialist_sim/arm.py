@@ -1,9 +1,9 @@
 """Kinematic replay of a Specialist gripper mounted on a Franka FR3."""
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import mujoco
 import numpy as np
@@ -65,6 +65,20 @@ class Fr3Layout:
 
 @dataclass(frozen=True)
 class IkCfg:
+  max_velocity_rad_s: dict[str, float] = field(
+    default_factory=lambda: {
+      "fr3_joint1": 2.62,
+      "fr3_joint2": 2.62,
+      "fr3_joint3": 2.62,
+      "fr3_joint4": 2.62,
+      "fr3_joint5": 5.26,
+      "fr3_joint6": 4.18,
+      "fr3_joint7": 5.26,
+    }
+  )
+  velocity_tolerance_rad_s: float = 1e-8
+  fk_position_tolerance_m: float = 1e-6
+  fk_rotation_tolerance_rad: float = 1e-6
   position_tolerance_m: float = 0.005
   rotation_tolerance_deg: float = 3.0
   near_limit_deg: float = 2.0
@@ -77,6 +91,10 @@ class IkCfg:
 
   def __post_init__(self) -> None:
     positive = (
+      *self.max_velocity_rad_s.values(),
+      self.velocity_tolerance_rad_s,
+      self.fk_position_tolerance_m,
+      self.fk_rotation_tolerance_rad,
       self.position_tolerance_m,
       self.rotation_tolerance_deg,
       self.near_limit_deg,
@@ -237,6 +255,14 @@ class IkResult:
   q: Float64Array | None
   converged: bool
   status: str
+  projected: tuple[str, ...] = ()
+
+
+@runtime_checkable
+class TimedSolver(Protocol):
+  def solve_frame(
+    self, target: Float64Array, previous: Float64Array, dt: float | None
+  ) -> IkResult: ...
 
 
 class Solver(Protocol):
@@ -303,6 +329,12 @@ class Frame:
   near_limits: tuple[str, ...]
   collisions: tuple[tuple[str, str], ...]
 
+  dt: float | None
+  velocity: Float64Array | None
+  at_speed_limit: tuple[str, ...]
+  over_speed_limit: tuple[str, ...]
+  projected: tuple[str, ...]
+
   @property
   def passed(self) -> bool:
     return (
@@ -310,12 +342,25 @@ class Frame:
     )
 
 
-def replay(arm: Fr3, solver: Solver, track: HandState, cfg: IkCfg) -> Iterator[Frame]:
-  previous = arm.home
+def replay(
+  arm: Fr3, solver: Solver | TimedSolver, track: HandState, cfg: IkCfg
+) -> Iterator[Frame]:
+  if not np.isfinite(track.times).all() or np.any(np.diff(track.times) <= 0):
+    raise ValueError("frame timestamps must be finite and strictly increasing")
+  if set(arm.joint_names) != cfg.max_velocity_rad_s.keys():
+    raise ValueError("max_velocity_rad_s must name each arm joint")
+  vmax = np.array([cfg.max_velocity_rad_s[n] for n in arm.joint_names])
+  last_output = previous = arm.home
+  last_time: float | None = None
   for instant, target, requested in zip(
     track.times, track.poses, track.opening, strict=True
   ):
-    result = solver.solve(target, previous)
+    dt = None if last_time is None else float(instant) - last_time
+    if isinstance(solver, TimedSolver):
+      previous = last_output
+      result = solver.solve_frame(target, previous, dt)
+    else:
+      result = solver.solve(target, previous)
     if set(result.joints) != set(arm.joint_names) or len(result.joints) != len(
       arm.joint_names
     ):
@@ -337,6 +382,9 @@ def replay(arm: Fr3, solver: Solver, track: HandState, cfg: IkCfg) -> Iterator[F
       previous = q
     margin = np.rad2deg(np.minimum(q - arm.lower, arm.upper - q))
 
+    velocity = None if dt is None else (q - last_output) / dt
+    speed = np.zeros_like(q) if velocity is None else np.abs(velocity)
+    last_time, last_output = float(instant), q
     yield Frame(
       float(instant),
       target,
@@ -356,4 +404,23 @@ def replay(arm: Fr3, solver: Solver, track: HandState, cfg: IkCfg) -> Iterator[F
         if value <= cfg.near_limit_deg
       ),
       arm.collision_pairs(cfg.min_penetration_m),
+      dt,
+      velocity,
+      tuple(
+        n
+        for n, hit in zip(
+          arm.joint_names,
+          np.abs(speed - vmax) <= cfg.velocity_tolerance_rad_s,
+          strict=True,
+        )
+        if hit
+      ),
+      tuple(
+        n
+        for n, over in zip(
+          arm.joint_names, speed > vmax + cfg.velocity_tolerance_rad_s, strict=True
+        )
+        if over
+      ),
+      result.projected,
     )

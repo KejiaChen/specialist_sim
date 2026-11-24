@@ -23,7 +23,7 @@ from specialist_dataset import schema
 from specialist_dataset.layer import encode
 from specialist_dataset.read import Recording
 
-from specialist_sim import gripper, video
+from specialist_sim import gripper, omega_ik, video
 from specialist_sim.arm import BoundedIk, Fr3, Fr3Layout, Frame, IkCfg, replay
 from specialist_sim.arrays import Float64Array, UInt8Array
 from specialist_sim.take import hand_state, sole_state_layer
@@ -98,6 +98,11 @@ def write_frames(path: Path, frames: list[Frame], layout: Fr3Layout) -> None:
         "passed",
         *(f"target_{x}" for x in pose_labels),
         *(f"actual_{x}" for x in pose_labels),
+        "dt_s",
+        *(f"{name}_velocity_rad_s" for name in layout.joints),
+        "at_speed_limit",
+        "over_speed_limit",
+        "projected_joints",
       ]
     )
     writer.writerows(
@@ -117,6 +122,11 @@ def write_frames(path: Path, frames: list[Frame], layout: Fr3Layout) -> None:
         int(f.passed),
         *f.target,
         *f.actual,
+        f.dt,
+        *(f.velocity if f.velocity is not None else [None] * len(layout.joints)),
+        json.dumps(f.at_speed_limit),
+        json.dumps(f.over_speed_limit),
+        json.dumps(f.projected),
       )
       for f in frames
     )
@@ -150,6 +160,17 @@ def summary(frames: list[Frame], layout: Fr3Layout, ik: IkCfg) -> dict[str, Any]
     "time_range_s": [frames[0].time, frames[-1].time],
     "passed": passed,
     "pass_rate": passed / len(frames),
+    "velocity_abs_rad_s": {
+      name: statistics(
+        [abs(float(f.velocity[i])) for f in frames if f.velocity is not None]
+      )
+      for i, name in enumerate(layout.joints)
+    }
+    if len(frames) > 1
+    else {},
+    "over_speed_frames": sum(bool(f.over_speed_limit) for f in frames),
+    "at_speed_limit_frames": sum(bool(f.at_speed_limit) for f in frames),
+    "filter_projection_frames": sum(bool(f.projected) for f in frames),
     "pose_ok": sum(frame.pose_ok for frame in frames),
     "solver_status": Counter(frame.status for frame in frames),
     "solver_not_converged": sum(not frame.converged for frame in frames),
@@ -289,6 +310,13 @@ def main() -> None:
     "--config", type=Path, required=True, help="FR3 installation TOML"
   )
   parser.add_argument("--model", type=Path, help="override the FR3 MJCF path")
+  parser.add_argument(
+    "--solver", choices=("scipy", "omega", "omega-limited"), default="scipy"
+  )
+  parser.add_argument("--omega-root", type=Path, help="Omega-Infra dev-fr3 checkout")
+  parser.add_argument(
+    "--omega-python", type=Path, help="Python executable with the Omega IK environment"
+  )
   output = parser.add_mutually_exclusive_group(required=True)
   output.add_argument("--output-dir", type=Path, help="write full trajectory reports")
   output.add_argument(
@@ -323,27 +351,55 @@ def main() -> None:
   except (KeyError, OSError, TypeError, ValueError) as exc:
     parser.error(str(exc))
 
+  names = ["frames.csv", "summary.json"]
+  if args.video:
+    names.append("replay.mp4")
+  if args.output_dir is not None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if present := [name for name in names if (args.output_dir / name).exists()]:
+      parser.error(f"{args.output_dir}: outputs already exist: {', '.join(present)}")
+
+  solver_info: dict[str, Any] = {}
   if args.preview_first is not None:
-    frame = next(replay(arm, BoundedIk(arm, ik), track, ik))
-    preview_first(args.preview_first, arm, layout, frame, video_cfg)
+    track = type(track)(track.times[:1], track.poses[:1], track.opening[:1])
+  print(
+    f"{args.session} {args.hand}: solving {len(track.times)} state rows with {args.solver}",
+    flush=True,
+  )
+  if args.solver == "scipy":
+    import scipy  # type: ignore[import-untyped]
+
+    solver_info["scipy"] = scipy.__version__
+    frames = list(replay(arm, BoundedIk(arm, ik), track, ik))
+  else:
+    if args.omega_root is None or args.omega_python is None:
+      parser.error("Omega requires --omega-root and --omega-python")
+    with args.config.open("rb") as file:
+      settings = tomllib.load(file).get("omega", {})
+    try:
+      with omega_ik.open_omega(
+        args.omega_root,
+        args.omega_python,
+        arm,
+        layout,
+        ik,
+        args.solver == "omega-limited",
+        settings,
+      ) as (solver, solver_info):
+        frames = list(replay(arm, solver, track, ik))
+    except (ValueError, RuntimeError, OSError) as exc:
+      parser.error(f"{args.omega_python} in {args.omega_root}: {exc}")
+  if args.preview_first is not None:
+    preview_first(args.preview_first, arm, layout, frames[0], video_cfg)
     if not args.no_preview_window:
       open_preview(args.preview_first)
     return
 
-  args.output_dir.mkdir(parents=True, exist_ok=True)
-  names = ["frames.csv", "summary.json"]
-  if args.video:
-    names.append("replay.mp4")
-  if present := [name for name in names if (args.output_dir / name).exists()]:
-    parser.error(f"{args.output_dir}: outputs already exist: {', '.join(present)}")
-
-  print(
-    f"{args.session} {args.hand}: solving {len(track.times)} state rows on FR3",
-    flush=True,
-  )
-  frames = list(replay(arm, BoundedIk(arm, ik), track, ik))
   report = summary(frames, layout, ik)
   report.update(
+    solver=args.solver,
+    solver_info=solver_info,
+    sim_revision=omega_ik.revision(Path(__file__).resolve().parent),
     session=args.session,
     hand=args.hand,
     state_path=str(state_path.resolve()),
