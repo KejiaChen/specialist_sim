@@ -77,6 +77,7 @@ def export_chain(arm: Fr3, layout: Fr3Layout, cfg: IkCfg) -> dict[str, Any]:
   return dict(
     joints=joints,
     **end,
+    home=arm.home[order].tolist(),
     lower=arm.lower[order].tolist(),
     upper=arm.upper[order].tolist(),
     vmax=[cfg.max_velocity_rad_s[name] for name in names],
@@ -185,6 +186,10 @@ def open_omega(
       info = solver.request(dict(chain=chain, settings=settings, limited=limited))
       if info["joints"] != list(solver.names):
         raise ValueError("Omega joint order does not match exported chain")
+      if info.get("posture_reference_rad") != chain["home"]:
+        raise ValueError(
+          "Omega worker did not confirm the model home posture; update dev-fr3"
+        )
       info.update(revision=revision(root), fk=verify_fk(solver, arm, layout, cfg))
       yield solver, info
     finally:

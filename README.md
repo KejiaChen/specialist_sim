@@ -269,7 +269,9 @@ dedicated Python environment. Add the following arguments to the replay command:
   --omega-python "$PWD/local/fr3-env/solver/bin/python"
 ```
 
-`omega` uses the H1-2 objective and four-sample filter on the FR3 chain.
+`omega` uses the H1-2 tracking costs and four-sample filter. Its posture cost is
+`regularization_weight * ||q - home||²`, with the reference read from the
+configured FR3 model keyframe and reported in joint order in the summary JSON.
 `omega-limited` also bounds every emitted joint step using the recorded time
 interval and the named `[ik.max_velocity_rad_s]` values (rad/s). The first
 sample establishes the initial pose. Both modes verify Pinocchio against

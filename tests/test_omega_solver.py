@@ -46,6 +46,7 @@ def test_fr3_solver_and_failure_hold() -> None:
 
     frames = list(replay(arm, FailThird(), track, cfg))
   assert frames[0].converged
+  assert frames[0].pose_ok
   assert not frames[1].pose_ok and not frames[1].held_previous
   assert frames[2].held_previous and frames[3].converged
   np.testing.assert_array_equal(frames[2].q, frames[1].q)
