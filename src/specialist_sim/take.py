@@ -19,6 +19,41 @@ SIDE: schema.LensName = "rear"
 
 
 @dataclass(frozen=True)
+class HandState:
+  """One reconstructed hand on the original state timeline."""
+
+  times: Float64Array
+  poses: Float64Array
+  opening: Float64Array
+
+
+def hand_state(recording: Recording, hand: str) -> HandState:
+  """Read just the dense state, with no requirement for images or another hand."""
+  times, translations = recording.values(
+    schema.state_pose(hand), schema.POSE_TRANSLATION, 3
+  )
+  q_times, quaternions = recording.values(
+    schema.state_pose(hand), schema.POSE_QUATERNION, 4
+  )
+  opening_times, opening = recording.values(
+    schema.state_opening(hand), schema.SCALARS, 1
+  )
+  if not len(times) or not (
+    np.array_equal(times, q_times) and np.array_equal(times, opening_times)
+  ):
+    raise ValueError(f"{hand}: pose and opening must share a nonempty timeline")
+  if not all(
+    np.isfinite(values).all() for values in (times, translations, quaternions, opening)
+  ):
+    raise ValueError(f"{hand}: state contains nonfinite values")
+  if np.any(np.diff(times) <= 0.0) or np.any(
+    np.linalg.norm(quaternions, axis=1) == 0.0
+  ):
+    raise ValueError(f"{hand}: state needs increasing times and nonzero quaternions")
+  return HandState(times, _posed(translations, quaternions), opening[:, 0])
+
+
+@dataclass(frozen=True)
 class Track:
   """One hand's observations, and the state the policy is given beside them."""
 
@@ -51,7 +86,7 @@ class Take:
     anchors = read_anchors(estimate).poses
     world_from_room = _world_from_room(anchors[min(anchors)], anchors[max(anchors)])
     self.room_from_world = rotation.inverse(world_from_room)
-    observed = schema.layer_rrd(dataset, layer or _sole_layer(dataset), session)
+    observed = schema.layer_rrd(dataset, layer or sole_state_layer(dataset), session)
     with Recording(observed) as seen, Recording(estimate) as solve:
       tracks = [_track(seen, solve, hand) for hand in schema.HANDS]
     image_times = np.mean([track.image_times for track in tracks], axis=0)
@@ -146,8 +181,7 @@ def _tag_seat(solve: Recording, slot: str) -> Float64Array:
 
 
 def _track(seen: Recording, solve: Recording, hand: str) -> Track:
-  times, translations = seen.values(schema.state_pose(hand), schema.POSE_TRANSLATION, 3)
-  stored = seen.values(schema.state_pose(hand), schema.POSE_QUATERNION, 4)[1]
+  state = hand_state(seen, hand)
   table = seen.series(f"/{schema.state_image(hand)}")
   column = schema.selector(schema.state_image(hand), "EncodedImage:blob")
   rowwise = table.column(column).combine_chunks().drop_null().to_pylist()
@@ -155,18 +189,20 @@ def _track(seen: Recording, solve: Recording, hand: str) -> Track:
   return Track(
     slot=slot,
     tag_from_lens=_tag_seat(solve, slot),
-    times=times,
-    poses=_posed(translations, stored),
-    opening=seen.values(schema.state_opening(hand), schema.SCALARS, 1)[1][:, 0],
+    times=state.times,
+    poses=state.poses,
+    opening=state.opening,
     image_times=seen.seconds(table),
     images=[bytes(blob) for (blob,) in rowwise],
   )
 
 
-def _sole_layer(dataset: Path) -> str:
-  """The one state configuration a dataset holds."""
-  (found,) = sorted(p.name for p in dataset.glob(f"{schema.STATE}_*") if p.is_dir())
-  return found
+def sole_state_layer(dataset: Path) -> str:
+  """Select a state layer when the dataset provides exactly one."""
+  found = sorted(p.name for p in dataset.glob(f"{schema.STATE}_*") if p.is_dir())
+  if len(found) != 1:
+    raise ValueError(f"{dataset}: expected one state layer, found {found}; use --layer")
+  return found[0]
 
 
 def _world_from_room(left: Float64Array, right: Float64Array) -> Float64Array:

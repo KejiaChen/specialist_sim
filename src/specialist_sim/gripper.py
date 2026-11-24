@@ -6,6 +6,7 @@ coupled, so this differs negligibly from the dataset's ``(left - right) / 2``.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import mujoco
 import numpy as np
@@ -31,6 +32,8 @@ GRIPPING = 4
 
 # The described parts a lens looks out of, and so cannot see.
 HOUSING = ("x3_", "protector")
+BASE_BODY = "base"
+TAG_BODY = "base_tag"
 
 
 @dataclass(frozen=True)
@@ -51,14 +54,19 @@ class Hand:
   """The geoms of the ``HOUSING`` its lens looks out of."""
 
 
-def _described(side: int, finger: tuple[float, float]) -> mujoco.MjSpec:
+def _described(
+  side: int, finger: tuple[float, float], model_path: Path | None
+) -> mujoco.MjSpec:
   """The gripper as described, with a finger servo of ``finger``'s stiffness and
   damping. The hand at ``side``, its index in ``HANDS``, gets a contact bit of
   its own that meets the other's, since the description lets two grippers pass
   through each other."""
-  described = mujoco.MjSpec.from_file(
-    str(specialist_description.get_mjcf_path("specialist_actuated"))
+  asset = (
+    specialist_description.get_mjcf_path("specialist_actuated")
+    if model_path is None
+    else model_path
   )
+  described = mujoco.MjSpec.from_file(str(asset))
   # A servo on the right finger; the description couples the left to it.
   servo = described.add_actuator(
     name="right_finger", target="right_finger", trntype=mujoco.mjtTrn.mjTRN_JOINT
@@ -81,17 +89,38 @@ def attach(
   hand: str,
   lens: Lens,
   finger: tuple[float, float],
+  *,
+  model_path: Path | None = None,
+  mount_body: str = TAG_BODY,
+  base_from_tag: Float64Array | None = None,
 ) -> None:
-  """Attach a hand's gripper so its base tag lands on ``body``, and add the lens
-  site ``{hand}_gripper_lens`` on the base where ``lens`` sits."""
-  described = _described(HANDS.index(hand), finger)
-  tag = described.body("base_tag")
+  """Align the named gripper body with the carrier; default to the stock tag."""
+  described = _described(HANDS.index(hand), finger, model_path)
+  base = described.body(BASE_BODY)
+  if base is None:
+    raise ValueError(f"gripper has no {BASE_BODY} body")
+  if mount_body == BASE_BODY and (
+    base.parent.name != described.worldbody.name or base.joints
+  ):
+    raise ValueError(f"gripper {BASE_BODY} must be fixed and directly under worldbody")
+  tag = described.body(TAG_BODY)
+  if base_from_tag is not None:
+    if tag is not None:
+      raise ValueError(
+        f"gripper already defines {TAG_BODY}; omit gripper_base_from_tag"
+      )
+    base.add_body(name=TAG_BODY, pos=base_from_tag[:3], quat=base_from_tag[3:])
+  elif tag is None:
+    raise ValueError(f"gripper has no {TAG_BODY}; supply gripper_base_from_tag")
+  anchor = described.body(mount_body)
+  if anchor is None:
+    raise ValueError(f"gripper has no mount body {mount_body}")
   pos, quat = np.zeros(3), np.zeros(4)
-  mujoco.mju_negPose(pos, quat, tag.pos, tag.quat)
+  mujoco.mju_negPose(pos, quat, anchor.pos, anchor.quat)
   spec.attach(
     described, prefix=f"{hand}_gripper_", frame=body.add_frame(pos=pos, quat=quat)
   )
-  spec.body(f"{hand}_gripper_base").add_site(
+  spec.body(f"{hand}_gripper_{BASE_BODY}").add_site(
     name=f"{hand}_gripper_lens", pos=list(lens.pos), quat=list(lens.quat)
   )
 
@@ -104,8 +133,8 @@ def bind(model: mujoco.MjModel, hand: str) -> Hand:
   housing = tuple(f"{prefix}{part}" for part in HOUSING)
   return Hand(
     name=hand,
-    base=model.body(f"{prefix}base").id,
-    tag=model.body(f"{prefix}base_tag").id,
+    base=model.body(f"{prefix}{BASE_BODY}").id,
+    tag=model.body(f"{prefix}{TAG_BODY}").id,
     lens_site=model.site(f"{prefix}lens").id,
     fingers=(int(left.qposadr[0]), int(right.qposadr[0])),
     servo=int(model.actuator(right.name).id),

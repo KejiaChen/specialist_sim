@@ -235,3 +235,28 @@ uv run --extra dataset sim-replay \
   --dataset ~/dataset_0903 --session 20260903_030121_IAQEB2601UVVAJ \
   --layer state_s12_r100 --out overlay.mp4
 ```
+
+## Replaying one hand on a Franka FR3
+
+`sim-replay-arm` runs offline IK for a reconstructed `state_*` layer. Keep
+[`fr3.xml` and its assets](https://github.com/google-deepmind/mujoco_menagerie/tree/98a70c569c4c1b6da467a20012f766ee1f8dc521/franka_fr3)
+together and set `layout.model` or pass `--model`.
+
+```bash
+MUJOCO_GL=egl uv run --extra arm sim-replay-arm \
+  --dataset path/to/dataset --session SESSION_ID \
+  --config src/specialist_sim/configs/fr3.toml \
+  --output-dir local/fr3-replay --video
+```
+
+- Use [`fr3_omega.toml`](src/specialist_sim/configs/fr3_omega.toml) for the Omega
+  adapter. Model paths are relative to the TOML file.
+- The default hand is `right`. Use `--hand left` for the other hand and
+  `--layer` if the dataset has multiple state layers.
+- Omit `--video` for just `frames.csv` and `summary.json`. To inspect the first
+  pose, replace `--output-dir … --video` with `--preview-first first.jpg`.
+  Add `--no-preview-window` to save the image without opening it.
+
+The reports measure pose error, joint limits, and collisions at sampled poses.
+The example layouts are virtual. For hardware comparisons, measure the base
+and mount transforms and calibrate the Omega tag pose and finger zero.

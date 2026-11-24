@@ -1,0 +1,27 @@
+# Virtual base placement for pick_cup_02/trial_261117_002.
+[layout]
+label = "FR3 with Omega adapter, nominal tag registration"
+model = "../../../local/models/mujoco_menagerie/franka_fr3/fr3.xml"
+gripper_mjcf = "../../../../specialist_description/specialist_omega_description/acuated_new.xml"
+
+# Each transform lists translation (x, y, z, metres), then rotation (qw, qx, qy, qz).
+world_from_base = [
+  0.15, -0.30, -0.53,
+  0.7071067811865476, 0.0, 0.0, -0.7071067811865476,
+]
+
+# Centre the CAD mating surface on the FR3 flange. CAD base +Z faces the arm.
+attachment_from_gripper_base = [
+  0.0, 0.0, 0.0,
+  0.0, 1.0, 0.0, 0.0,
+]
+
+# Nominal reconstruction tag from the shared finger hinge centres and axes.
+# Replace with a measured transform for physical alignment.
+gripper_base_from_tag = [
+  0.0, 0.12517481243016315, -0.05638991963185609,
+  0.5963678105290416, -0.3799281965908781, 0.3799281965908781, 0.5963678105290416,
+]
+
+# Source opening (rad) assumed at the CAD finger zero. Adjust after calibration.
+gripper_opening_at_zero = 0.0
