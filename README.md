@@ -279,3 +279,13 @@ MuJoCo before replay. The solver weights, filter weights and IPOPT budgets
 can be overridden in `[omega]`; the effective settings appear in the JSON.
 CSV velocity columns refer to adjacent emitted poses, including held frames.
 The default `scipy` backend retains its previous valid-pose warm start.
+
+For a Pink differential IK comparison, use `--solver pink --pink-root /path/to/pink
+--pink-python /path/to/python` with the same FR3 replay arguments. The worker
+imports that checkout using an interpreter with Pinocchio, NumPy, qpsolvers
+and DAQP. The first pose is initialized with the existing bounded SciPy IK.
+Each subsequent sample uses one Pink QP at the recorded time interval, with
+the configured joint angle and velocity limits. The defaults follow Pink's
+Panda example: frame position and orientation costs 1, LM damping 1, posture
+and damping task costs 0.001, with the FR3 home posture as reference. These
+five settings can be overridden in the TOML `[pink]` section.

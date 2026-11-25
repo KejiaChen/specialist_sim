@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from specialist_sim import rotation
-from specialist_sim.arm import Fr3, Fr3Layout, IkCfg, IkResult
+from specialist_sim.arm import BoundedIk, Fr3, Fr3Layout, IkCfg, IkResult
 from specialist_sim.arrays import Float64Array
 
 WORKER = "hal.arm.deploy.robot_control.fr3_replay_worker"
@@ -84,8 +84,9 @@ def export_chain(arm: Fr3, layout: Fr3Layout, cfg: IkCfg) -> dict[str, Any]:
   )
 
 
-class OmegaIk:
+class WorkerIk:
   def __init__(self, process: subprocess.Popen[str], arm: Fr3, layout: Fr3Layout):
+    self.initializer: BoundedIk | None = None
     self.process = process
     self.names = tuple(sorted(arm.joint_names, key=lambda n: arm.model.joint(n).id))
     self.order = [arm.joint_names.index(n) for n in self.names]
@@ -100,15 +101,15 @@ class OmegaIk:
     self.process.stdin.flush()
     line = self.process.stdout.readline()
     if not line:
-      raise RuntimeError(
-        f"Omega worker exited ({self.process.poll()}); see worker stderr"
-      )
+      raise RuntimeError(f"IK worker exited ({self.process.poll()}); see worker stderr")
     reply: dict[str, Any] = json.loads(line)
     return reply
 
   def solve_frame(
     self, target: Float64Array, previous: Float64Array, dt: float | None
   ) -> IkResult:
+    if dt is None and self.initializer is not None:
+      return self.initializer.solve(target, previous)
     pose = rotation.compose(self.base_from_world, target)
     answer = self.request(
       dict(
@@ -124,7 +125,7 @@ class OmegaIk:
 
 
 def verify_fk(
-  solver: OmegaIk, arm: Fr3, layout: Fr3Layout, cfg: IkCfg
+  solver: WorkerIk, arm: Fr3, layout: Fr3Layout, cfg: IkCfg
 ) -> dict[str, float]:
   rng = np.random.default_rng(0)
   poses = [
@@ -155,14 +156,14 @@ def verify_fk(
         or (errors > [cfg.fk_position_tolerance_m, cfg.fk_rotation_tolerance_rad]).any()
       ):
         raise ValueError(
-          f"Omega FK disagrees with MuJoCo at {name}, q={q}: {errors} (m, rad)"
+          f"Worker FK disagrees with MuJoCo at {name}, q={q}: {errors} (m, rad)"
         )
       worst = np.maximum(worst, errors)
   return dict(max_position_m=float(worst[0]), max_rotation_rad=float(worst[1]))
 
 
 @contextmanager
-def open_omega(
+def open_worker(
   root: Path,
   python: Path,
   arm: Fr3,
@@ -170,8 +171,15 @@ def open_omega(
   cfg: IkCfg,
   limited: bool,
   settings: dict[str, Any],
-) -> Iterator[tuple[OmegaIk, dict[str, Any]]]:
-  cmd = [str(python.absolute()), "-u", "-m", WORKER]
+  *,
+  pink: bool = False,
+) -> Iterator[tuple[WorkerIk, dict[str, Any]]]:
+  if pink and not (root / "pink/solve_ik.py").is_file():
+    raise ValueError("--pink-root must point to a Pink checkout")
+  entry = (
+    [str(Path(__file__).parent / "scripts/pink_worker.py")] if pink else ["-m", WORKER]
+  )
+  cmd = [str(python.absolute()), "-u", *entry]
   with subprocess.Popen(
     cmd,
     cwd=root,
@@ -182,14 +190,14 @@ def open_omega(
   ) as proc:
     try:
       chain = export_chain(arm, layout, cfg)
-      solver = OmegaIk(proc, arm, layout)
+      solver = WorkerIk(proc, arm, layout)
+      if pink:
+        solver.initializer = BoundedIk(arm, cfg)
       info = solver.request(dict(chain=chain, settings=settings, limited=limited))
       if info["joints"] != list(solver.names):
-        raise ValueError("Omega joint order does not match exported chain")
+        raise ValueError("Worker joint order does not match exported chain")
       if info.get("posture_reference_rad") != chain["home"]:
-        raise ValueError(
-          "Omega worker did not confirm the model home posture; update dev-fr3"
-        )
+        raise ValueError("IK worker did not confirm the model home posture")
       info.update(revision=revision(root), fk=verify_fk(solver, arm, layout, cfg))
       yield solver, info
     finally:
@@ -200,3 +208,7 @@ def open_omega(
           proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
           proc.kill()
+
+
+# Existing Omega callers use the same worker protocol.
+open_omega = open_worker

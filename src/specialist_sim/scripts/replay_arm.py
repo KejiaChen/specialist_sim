@@ -311,7 +311,11 @@ def main() -> None:
   )
   parser.add_argument("--model", type=Path, help="override the FR3 MJCF path")
   parser.add_argument(
-    "--solver", choices=("scipy", "omega", "omega-limited"), default="scipy"
+    "--solver", choices=("scipy", "omega", "omega-limited", "pink"), default="scipy"
+  )
+  parser.add_argument("--pink-root", type=Path, help="local Pink checkout")
+  parser.add_argument(
+    "--pink-python", type=Path, help="Python with Pinocchio, qpsolvers and DAQP"
   )
   parser.add_argument("--omega-root", type=Path, help="Omega-Infra dev-fr3 checkout")
   parser.add_argument(
@@ -372,23 +376,27 @@ def main() -> None:
     solver_info["scipy"] = scipy.__version__
     frames = list(replay(arm, BoundedIk(arm, ik), track, ik))
   else:
-    if args.omega_root is None or args.omega_python is None:
-      parser.error("Omega requires --omega-root and --omega-python")
+    backend = "pink" if args.solver == "pink" else "omega"
+    root = args.pink_root if backend == "pink" else args.omega_root
+    python = args.pink_python if backend == "pink" else args.omega_python
+    if root is None or python is None:
+      parser.error(f"{backend} requires --{backend}-root and --{backend}-python")
     with args.config.open("rb") as file:
-      settings = tomllib.load(file).get("omega", {})
+      settings = tomllib.load(file).get(backend, {})
     try:
-      with omega_ik.open_omega(
-        args.omega_root,
-        args.omega_python,
+      with omega_ik.open_worker(
+        root,
+        python,
         arm,
         layout,
         ik,
-        args.solver == "omega-limited",
+        args.solver in ("pink", "omega-limited"),
         settings,
+        pink=backend == "pink",
       ) as (solver, solver_info):
         frames = list(replay(arm, solver, track, ik))
     except (ValueError, RuntimeError, OSError) as exc:
-      parser.error(f"{args.omega_python} in {args.omega_root}: {exc}")
+      parser.error(f"{python} in {root}: {exc}")
   if args.preview_first is not None:
     preview_first(args.preview_first, arm, layout, frames[0], video_cfg)
     if not args.no_preview_window:
