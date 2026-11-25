@@ -6,7 +6,7 @@ gripper_mjcf = "../../../../specialist_description/specialist_omega_description/
 
 # Each transform lists translation (x, y, z, metres), then rotation (qw, qx, qy, qz).
 world_from_base = [
-  0.15, -0.30, -0.53,
+  0.15, -0.30, -0.57,
   0.7071067811865476, 0.0, 0.0, -0.7071067811865476,
 ]
 
