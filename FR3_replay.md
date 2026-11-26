@@ -1,5 +1,28 @@
 # FR3 单臂轨迹回放：SciPy、Omega 限速 IK 与 Pink
 
+## 双桌布局
+
+`src/specialist_sim/configs/fr3_omega.toml` 默认启用双桌。底座桌面为
+80 × 120 cm，离地 75 cm。FR3 底座距朝外的短边约 5 mm，`home` 姿态
+伸向 60 × 120 cm 的操作桌，操作桌面离地 94 cm。双桌随 FR3 的标定基座
+定位，地面位于基座安装面下方 75 cm。
+
+在 `[layout.tables]` 中设置 `work_y` 可横移操作桌，设置
+`work_yaw_deg` 可绕竖直轴逆时针旋转。默认相对角度为 90°。操作桌的
+纵向位置会随角度调整，使两桌的纵向间距保持 4 cm。也可设置 `work_x`
+直接指定操作桌中心的纵向位置。坐标以底座桌中心为原点，+X 指向操作桌，
++Y 指向左侧，距离单位是米。
+
+可在 PowerShell 中直接预览 `home` 姿态。当前配置从
+`local/models/specialist_omega_description/acuated_new.xml` 读取由
+`acuated_new.urdf` 转换的夹爪。模型和它引用的网格应一起保留。
+使用其他 MJCF 时可修改 `layout.gripper_mjcf` 或传入 `--gripper-mjcf`。
+源 CAD 导出保留了关节运动学，夹爪惯量由网格推算，行程沿用回放约定。
+
+```powershell
+uv run --locked --all-extras sim-replay-arm --config src/specialist_sim/configs/fr3_omega.toml --preview-home local/fr3-home.jpg --no-preview-window
+```
+
 ## 换一条轨迹：先设置回放参数
 
 [FR3_replay.sh](FR3_replay.sh) 开头定义了默认参数。每次选一个后端运行，换数据时只传需要覆盖的选项。例如，在仓库根目录用 Pink 回放另一条轨迹（将示例路径和 ID 换成实际值）：

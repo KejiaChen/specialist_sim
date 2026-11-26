@@ -25,6 +25,7 @@ from specialist_dataset.read import Recording
 
 from specialist_sim import gripper, omega_ik, video
 from specialist_sim.arm import BoundedIk, Fr3, Fr3Layout, Frame, IkCfg, replay
+from specialist_sim.arm_tables import Fr3Tables
 from specialist_sim.arrays import Float64Array, UInt8Array
 from specialist_sim.take import hand_state, sole_state_layer
 
@@ -50,7 +51,9 @@ class VideoCfg:
       raise ValueError("video fps must be positive")
 
 
-def read_config(path: Path, model: Path | None) -> tuple[Fr3Layout, IkCfg, VideoCfg]:
+def read_config(
+  path: Path, model: Path | None, *, gripper_mjcf: Path | None = None
+) -> tuple[Fr3Layout, IkCfg, VideoCfg]:
   with path.open("rb") as file:
     config = tomllib.load(file)
   layout = dict(config["layout"])
@@ -66,8 +69,19 @@ def read_config(path: Path, model: Path | None) -> tuple[Fr3Layout, IkCfg, Video
   ):
     if field in layout:
       layout[field] = tuple(layout[field])
-  if "gripper_mjcf" in layout:
-    layout["gripper_mjcf"] = (path.parent / layout["gripper_mjcf"]).resolve(strict=True)
+  declared_gripper = layout.get("gripper_mjcf")
+  if gripper_mjcf is None and declared_gripper is not None:
+    gripper_mjcf = path.parent / declared_gripper
+  if gripper_mjcf is not None:
+    gripper_mjcf = gripper_mjcf.resolve()
+    if not gripper_mjcf.is_file():
+      raise FileNotFoundError(
+        f"gripper MJCF missing at {gripper_mjcf}. "
+        "Set layout.gripper_mjcf or pass --gripper-mjcf."
+      )
+    layout["gripper_mjcf"] = gripper_mjcf
+  if "tables" in layout:
+    layout["tables"] = Fr3Tables(**layout["tables"])
   if "joints" in layout:
     layout["joints"] = tuple(layout["joints"])
   return (
@@ -209,12 +223,20 @@ def _marker(
 @contextmanager
 def frame_renderer(
   arm: Fr3, layout: Fr3Layout, frames: Sequence[Frame], cfg: VideoCfg
-) -> Iterator[Callable[[Frame], UInt8Array]]:
+) -> Iterator[Callable[[Frame | None], UInt8Array]]:
   camera = mujoco.MjvCamera()
-  camera.lookat[:] = (
-    np.mean([f.target[:3] for f in frames], axis=0)
-    + np.array(layout.world_from_base[:3])
-  ) / 2
+  if layout.tables is not None:
+    mount = arm.model.body("mount_table").pos
+    work = arm.model.body("work_table").pos
+    camera.lookat[:2] = (mount[:2] + work[:2]) / 2
+    camera.lookat[2] = mount[2]
+  else:
+    target = (
+      np.mean([f.target[:3] for f in frames], axis=0)
+      if frames
+      else arm.tag_pose(arm.home)[:3]
+    )
+    camera.lookat[:] = (target + np.array(layout.world_from_base[:3])) / 2
   camera.distance, camera.azimuth, camera.elevation = (
     cfg.distance,
     cfg.azimuth,
@@ -229,12 +251,18 @@ def frame_renderer(
   arm.model.vis.global_.offheight = cfg.height
   with mujoco.Renderer(arm.model, cfg.height, cfg.width) as viewer:
 
-    def draw(frame: Frame) -> UInt8Array:
-      arm.place(frame.q, frame.opening)
+    def draw(frame: Frame | None) -> UInt8Array:
+      if frame is None:
+        arm.place(arm.home, gripper.OPEN)
+      else:
+        arm.place(frame.q, frame.opening)
       viewer.update_scene(arm.data, camera, scene_option=option)
-      _marker(viewer.scene, frame.target[:3], cfg.target_radius, [0.1, 0.65, 1.0, 0.45])
-      color = [0.2, 0.9, 0.2, 1.0] if frame.passed else [0.95, 0.2, 0.12, 1.0]
-      _marker(viewer.scene, frame.actual[:3], cfg.actual_radius, color)
+      if frame is not None:
+        _marker(
+          viewer.scene, frame.target[:3], cfg.target_radius, [0.1, 0.65, 1.0, 0.45]
+        )
+        color = [0.2, 0.9, 0.2, 1.0] if frame.passed else [0.95, 0.2, 0.12, 1.0]
+        _marker(viewer.scene, frame.actual[:3], cfg.actual_radius, color)
       return np.asarray(viewer.render(), dtype=np.uint8)
 
     yield draw
@@ -254,16 +282,19 @@ def render(
       write(draw(frames[i]))
 
 
-def preview_first(
-  path: Path, arm: Fr3, layout: Fr3Layout, frame: Frame, cfg: VideoCfg
-) -> None:
-  with frame_renderer(arm, layout, (frame,), cfg) as draw:
-    jpeg = encode(draw(frame))
+def _save_preview(path: Path, jpeg: bytes) -> None:
   path.parent.mkdir(parents=True, exist_ok=True)
   with tempfile.TemporaryDirectory(dir=path.parent) as directory:
     staged = Path(directory) / path.name
     staged.write_bytes(jpeg)
     staged.replace(path)
+
+
+def preview_first(
+  path: Path, arm: Fr3, layout: Fr3Layout, frame: Frame, cfg: VideoCfg
+) -> None:
+  with frame_renderer(arm, layout, (frame,), cfg) as draw:
+    _save_preview(path, encode(draw(frame)))
   print(
     f"First point at {frame.time:.3f} s: {'passed' if frame.passed else 'failed'}, "
     f"{frame.position_error_m * 1000:.3f} mm, {frame.rotation_error_deg:.3f} deg, "
@@ -302,14 +333,17 @@ def open_preview(path: Path) -> None:
 
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--dataset", type=Path, required=True)
-  parser.add_argument("--session", required=True)
+  parser.add_argument("--dataset", type=Path)
+  parser.add_argument("--session")
   parser.add_argument("--layer", help="which state layer to read")
   parser.add_argument("--hand", choices=gripper.HANDS, default="right")
   parser.add_argument(
     "--config", type=Path, required=True, help="FR3 installation TOML"
   )
   parser.add_argument("--model", type=Path, help="override the FR3 MJCF path")
+  parser.add_argument(
+    "--gripper-mjcf", type=Path, help="override the gripper MJCF path"
+  )
   parser.add_argument(
     "--solver", choices=("scipy", "omega", "omega-limited", "pink"), default="scipy"
   )
@@ -329,22 +363,39 @@ def main() -> None:
     metavar="IMAGE.jpg",
     help="solve only the first trajectory point and save or replace its JPEG preview",
   )
+  output.add_argument(
+    "--preview-home",
+    type=Path,
+    metavar="IMAGE.jpg",
+    help="save a JPEG of the configured scene at FR3 home without a dataset",
+  )
   parser.add_argument("--video", action="store_true", help="render an overview MP4")
   parser.add_argument(
     "--no-preview-window",
     action="store_true",
-    help="save the first-point preview without opening the desktop viewer",
+    help="save the preview without opening the desktop viewer",
   )
   args = parser.parse_args()
-  if args.preview_first is not None:
+  preview = args.preview_home or args.preview_first
+  if preview is not None:
     if args.video:
       parser.error("--video requires --output-dir")
-    if args.preview_first.suffix.lower() not in PREVIEW_SUFFIXES:
-      parser.error(
-        f"--preview-first requires an image path ending in {', '.join(PREVIEW_SUFFIXES)}"
-      )
+    if preview.suffix.lower() not in PREVIEW_SUFFIXES:
+      parser.error(f"preview path must end in {', '.join(PREVIEW_SUFFIXES)}")
+  if args.preview_home is None and (args.dataset is None or args.session is None):
+    parser.error("replay requires --dataset and --session")
   try:
-    layout, ik, video_cfg = read_config(args.config, args.model)
+    layout, ik, video_cfg = read_config(
+      args.config, args.model, gripper_mjcf=args.gripper_mjcf
+    )
+    if args.preview_home is not None:
+      home_arm = Fr3(layout, args.hand)
+      with frame_renderer(home_arm, layout, (), video_cfg) as draw:
+        _save_preview(args.preview_home, encode(draw(None)))
+      print(f"Wrote {args.preview_home}")
+      if not args.no_preview_window:
+        open_preview(args.preview_home)
+      return
     layer = args.layer or sole_state_layer(args.dataset)
     state_path = schema.layer_rrd(args.dataset, layer, args.session)
     if not state_path.is_file():

@@ -250,7 +250,9 @@ MUJOCO_GL=egl uv run --extra arm sim-replay-arm \
 ```
 
 - Use [`fr3_omega.toml`](src/specialist_sim/configs/fr3_omega.toml) for the Omega
-  adapter. Model paths are relative to the TOML file.
+  adapter and the dual-table workcell. Model paths are relative to the TOML
+  file. See [the workcell settings](FR3_replay.md#双桌布局) to adjust the tables
+  or preview the home pose without a dataset.
 - The default hand is `right`. Use `--hand left` for the other hand and
   `--layer` if the dataset has multiple state layers.
 - Omit `--video` for just `frames.csv` and `summary.json`. To inspect the first

@@ -10,6 +10,7 @@ import numpy as np
 from scipy.optimize import least_squares  # type: ignore[import-untyped]
 
 from specialist_sim import gripper, rotation
+from specialist_sim.arm_tables import Fr3Tables
 from specialist_sim.arrays import Float64Array
 from specialist_sim.camera.lens import Lens
 from specialist_sim.env import Cfg, Lighting
@@ -41,6 +42,7 @@ class Fr3Layout:
     "fr3_joint7",
   )
   visual_group: int = 2
+  tables: Fr3Tables | None = None
 
   def mount(self) -> tuple[str, Float64Array]:
     if self.gripper_mjcf is None:
@@ -142,6 +144,8 @@ class Fr3:
       raise ValueError("gripper_opening_at_zero must be finite")
     spec.body(layout.base_body).pos = base[:3]
     spec.body(layout.base_body).quat = base[3:]
+    if layout.tables is not None:
+      layout.tables.stand(spec.worldbody, base)
     site = spec.site(layout.flange_site)
     if site.parent.name != layout.flange_body:
       raise ValueError(f"{layout.flange_site} must be attached to {layout.flange_body}")
@@ -205,6 +209,8 @@ class Fr3:
       ],
       dtype=bool,
     )
+    if layout.tables is not None:
+      self.place(self.home, gripper.OPEN)
 
   def in_bounds(self, q: Float64Array) -> bool:
     return bool(
